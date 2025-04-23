@@ -1,0 +1,25 @@
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE / Editor specific files
+.idea/
+.vscode/
+*.swp
+*~
+
+# Secrets / Sensitive files
+.env
+config.py
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
