@@ -1,105 +1,37 @@
 # scheduler/utils.py
-import traceback
-from .constants import DAYS_OF_WEEK
+from .constants import SHIFT_TYPES, DAYS_OF_WEEK, SHIFTS as DEFAULT_SHIFTS
 
 
 def time_to_minutes(time_str):
     if not time_str or ":" not in time_str:
-        return 0
+        return -1
     try:
         hours, minutes = map(int, time_str.split(":"))
         if 0 <= hours <= 23 and 0 <= minutes <= 59:
             return hours * 60 + minutes
         else:
             print(f"Warning: time_to_minutes received out-of-range time: {time_str}")
-            return 0
+            return -1
     except ValueError:
         print(f"Warning: time_to_minutes encountered ValueError for: {time_str}")
-        return 0
+        return -1
 
 
-def is_available(employee_id, day_of_week, shift, unavailability_list):
-    if not isinstance(unavailability_list, list):
-        return True
-    if not isinstance(shift, dict) or "start" not in shift or "end" not in shift:
-        return False
-
-    try:
-        record = next(
-            (
-                item
-                for item in unavailability_list
-                if isinstance(item, dict)
-                and item.get("employeeId") == employee_id
-                and item.get("dayOfWeek") == day_of_week
-            ),
-            None,
-        )
-    except Exception as e:
-        print(
-            f"Error finding unavailability record for {employee_id} on {day_of_week}: {e}"
-        )
-        traceback.print_exc()
-        return True
-
-    if record is None:
-        return True
-
-    shift_start_min = time_to_minutes(shift["start"])
-    shift_end_min = time_to_minutes(shift["end"])
-    if shift_start_min >= shift_end_min and not (
-        shift_start_min == 0 and shift_end_min == 0
-    ):
-        return False
-
-    unavailable_shifts = record.get("shifts")
-    if not isinstance(unavailable_shifts, list):
-        return True
-
-    for unav_shift in unavailable_shifts:
-        if (
-            not isinstance(unav_shift, dict)
-            or "start" not in unav_shift
-            or "end" not in unav_shift
-        ):
-            continue
-
-        unav_start_min = time_to_minutes(unav_shift["start"])
-        unav_end_min = time_to_minutes(unav_shift["end"])
-        effective_unav_end_min = (
-            24 * 60
-            if (
-                unav_end_min <= unav_start_min
-                and not (unav_start_min == 0 and unav_end_min == 0)
-            )
-            else unav_end_min
-        )
-        if effective_unav_end_min == 0 and unav_start_min == 0:
-            continue
-        overlap = (shift_start_min < effective_unav_end_min) and (
-            unav_start_min < shift_end_min
-        )
-        covers = (unav_start_min <= shift_start_min) and (
-            effective_unav_end_min >= shift_end_min
-        )
-
-        if overlap or covers:
-            return False
-    return True
-
-
-def calculate_daily_hours(
-    employee_id, day_of_week, schedule, current_shifts_definitions
-):
+def calculate_daily_hours(employee_id, day_of_week, schedule, shift_definitions):
     total_hours = 0.0
+    current_shifts = (
+        shift_definitions if isinstance(shift_definitions, dict) else DEFAULT_SHIFTS
+    )
+
     if (
         not isinstance(schedule, dict)
         or day_of_week not in schedule
         or not isinstance(schedule[day_of_week], dict)
     ):
         return 0.0
+
     for shift_type, roles_dict in schedule[day_of_week].items():
-        shift_info = current_shifts_definitions.get(shift_type)
+        shift_info = current_shifts.get(shift_type)
         if (
             shift_info
             and isinstance(roles_dict, dict)
@@ -108,8 +40,52 @@ def calculate_daily_hours(
             for role, assigned_list in roles_dict.items():
                 if isinstance(assigned_list, list) and employee_id in assigned_list:
                     total_hours += shift_info["hours"]
-                    # break # Assuming one role per shift type assignment
     return total_hours
+
+
+def validate_shift_definitions(shift_defs):
+    if not isinstance(shift_defs, dict):
+        return False, "shiftDefinitions must be an object."
+    if not all(key in shift_defs for key in SHIFT_TYPES):
+        return (
+            False,
+            "Missing required shift types (HALF_DAY_AM, HALF_DAY_PM, FULL_DAY).",
+        )
+    try:
+        am_start = shift_defs["HALF_DAY_AM"]["start"]
+        am_end = shift_defs["HALF_DAY_AM"]["end"]
+        pm_start = shift_defs["HALF_DAY_PM"]["start"]
+        pm_end = shift_defs["HALF_DAY_PM"]["end"]
+        full_start = shift_defs["FULL_DAY"]["start"]
+        full_end = shift_defs["FULL_DAY"]["end"]
+        times_to_check = [am_start, am_end, pm_start, pm_end]
+        if not all(
+            isinstance(t, str) and len(t) == 5 and t[2] == ":" for t in times_to_check
+        ):
+            return False, "Invalid time format (must be HH:MM)."
+        # Check times are valid minutes
+        if (
+            time_to_minutes(am_start) < 0
+            or time_to_minutes(am_end) < 0
+            or time_to_minutes(pm_start) < 0
+            or time_to_minutes(pm_end) < 0
+        ):
+            return False, "Invalid time value in shift definitions."
+        # Check start < end
+        if time_to_minutes(am_start) >= time_to_minutes(am_end):
+            return False, "AM start must be before AM end."
+        if time_to_minutes(pm_start) >= time_to_minutes(pm_end):
+            return False, "PM start must be before PM end."
+        # Check consistency
+        if am_end != pm_start:
+            return False, "AM shift end must equal PM shift start."
+        # Check derived full day times match components
+        if full_start != am_start or full_end != pm_end:
+            return False, "Full day time must match AM start and PM end."
+    except (KeyError, TypeError, ValueError) as e:
+        print(f"Error during shift definition validation: {e}")
+        return False, "Invalid structure or value within shiftDefinitions object."
+    return True, None  # Validation passed
 
 
 def calculate_total_weekly_hours(employee_id, schedule, current_shifts_definitions):

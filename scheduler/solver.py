@@ -1,7 +1,7 @@
 # scheduler/solver.py
 import time
 from ortools.sat.python import cp_model
-from .constants import DAYS_OF_WEEK, ALL_ROLES, SHIFT_TYPES
+from .constants import DAYS_OF_WEEK
 from .utils import time_to_minutes, calculate_total_weekly_hours
 
 
@@ -17,84 +17,91 @@ def generate_schedule_with_ortools(
     staff_priority_list=[],
 ):
     print(
-        f"[OR-Tools] Starting generation (Custom Times, Pref: {shift_preference}, Staff Prio: {len(staff_priority_list)})..."
+        f"[OR-Tools] Starting generation (Pref: {shift_preference}, Staff Prio: {len(staff_priority_list)})..."
     )
     start_time = time.perf_counter()
 
+    # --- 1. Data Preprocessing & Validation ---
     if not isinstance(staff_list, list) or not staff_list:
         return None, ["Error: Staff list is empty or invalid."], 0
     if not isinstance(weekly_needs, dict):
         return None, ["Error: Weekly needs data is invalid."], 0
     if not isinstance(unavailability_list, list):
         unavailability_list = []
-    if (
-        not isinstance(shift_definitions, dict)
-        or not all(st in shift_definitions for st in SHIFT_TYPES)
-        or not all(
-            isinstance(shift_definitions[st], dict)
-            and "start" in shift_definitions[st]
-            and "end" in shift_definitions[st]
-            for st in SHIFT_TYPES
-        )
-    ):
-        return None, ["Error: Invalid shiftDefinitions structure received."], 0
-    try:
-        am_end = shift_definitions["HALF_DAY_AM"]["end"]
-        pm_start = shift_definitions["HALF_DAY_PM"]["start"]
-        full_start = shift_definitions["FULL_DAY"]["start"]
-        full_end = shift_definitions["FULL_DAY"]["end"]
-        am_start = shift_definitions["HALF_DAY_AM"]["start"]
-        pm_end = shift_definitions["HALF_DAY_PM"]["end"]
-        if am_end != pm_start:
-            return (
-                None,
-                [
-                    f"Error: AM shift end time ({am_end}) must equal PM shift start time ({pm_start})."
-                ],
-                0,
-            )
-        if full_start != am_start or full_end != pm_end:
-            return (
-                None,
-                [
-                    f"Error: Full day time ({full_start}-{full_end}) must match AM start ({am_start}) and PM end ({pm_end})."
-                ],
-                0,
-            )
-    except KeyError:
-        return None, ["Error: Incomplete shiftDefinitions data."], 0
+    if not isinstance(shift_definitions, dict):
+        return None, ["Error: Shift definitions are missing or invalid."], 0
 
     staff_map = {s["id"]: s for s in staff_list if isinstance(s, dict) and "id" in s}
     all_staff_ids = list(staff_map.keys())
     if not all_staff_ids:
-        return None, ["Error: Could not extract valid staff IDs from staffList."], 0
+        return None, ["Error: Could not extract valid staff IDs."], 0
+
+    # Dynamically determine active roles and role priorities
+    active_roles = set()
+    role_priority_map = {}  # {(s_id, role): score}
+    for staff in staff_list:
+        s_id = staff.get("id")
+        roles = staff.get("assignedRolesInPriority")
+        assigned_prio_roles = staff.get("assignedRolesInPriority")
+        if isinstance(roles, list):
+            active_roles.update(roles)
+        if s_id and isinstance(assigned_prio_roles, list):
+            active_roles.update(assigned_prio_roles)
+            max_prio = len(assigned_prio_roles)
+            for index, role in enumerate(assigned_prio_roles):
+                priority_score = max_prio - index
+                if priority_score > 0:
+                    role_priority_map[(s_id, role)] = priority_score
+    for day_needs in weekly_needs.values():
+        if isinstance(day_needs, dict):
+            for shift_needs in day_needs.values():
+                if isinstance(shift_needs, dict):
+                    active_roles.update(shift_needs.keys())
+    defined_roles = sorted(list(active_roles))
+    if not defined_roles:
+        print("Warning: No active roles found.")
+    print(f"[OR-Tools] Active roles for this run: {defined_roles}")
+
     max_possible_shortage = len(all_staff_ids) + 1
 
+    # Validate role_priority_map roles against defined_roles
+    role_priority_map = {
+        k: v for k, v in role_priority_map.items() if k[1] in defined_roles
+    }
+    print(
+        f"[OR-Tools] Validated Role priority map created with {len(role_priority_map)} entries."
+    )
+
+    # --- 2. Create CP-SAT Model ---
     model = cp_model.CpModel()
 
-    assign_vars = {}  # (s_id, d_idx, shift_type, role) -> BoolVar
-    shortage_vars = {}  # (d_idx, shift_type, role) -> IntVar >= 0
-    min_hour_shortage_tenths = {}  # (s_id) -> IntVar >= 0
-    total_weekly_hours_tenths = {}  # (s_id) -> IntVar >= 0
+    # --- 3. Define Core Variables ---
+    assign_vars = {}
+    shortage_vars = {}
+    min_hour_shortage_tenths = {}
+    total_weekly_hours_tenths = {}
 
+    # Create assign_vars (using defined_roles and keys from shift_definitions)
     for s_id in all_staff_ids:
         staff_data = staff_map[s_id]
-        possible_roles = staff_data.get("roles", [])
+        possible_roles = staff_data.get("assignedRolesInPriority", [])
         for d_idx, day in enumerate(DAYS_OF_WEEK):
-            for st in SHIFT_TYPES:
-                for role in ALL_ROLES:
+            for st in shift_definitions.keys():
+                for role in defined_roles:
                     if role in possible_roles:
                         assign_vars[(s_id, d_idx, st, role)] = model.NewBoolVar(
                             f"assign_{s_id}_{day}_{st}_{role}"
                         )
 
+    # Create shortage_vars (using defined_roles and keys from shift_definitions)
     for d_idx, day in enumerate(DAYS_OF_WEEK):
-        for st in SHIFT_TYPES:
-            for role in ALL_ROLES:
+        for st in shift_definitions.keys():
+            for role in defined_roles:
                 shortage_vars[(d_idx, st, role)] = model.NewIntVar(
                     0, max_possible_shortage, f"shortage_{day}_{st}_{role}"
                 )
 
+    # Create total_weekly_hours_tenths and min_hour_shortage_tenths vars
     for s_id, staff_data in staff_map.items():
         weekly_hours_terms = []
         for d_idx, day in enumerate(DAYS_OF_WEEK):
@@ -108,15 +115,13 @@ def generate_schedule_with_ortools(
                     ]
                     if vars_for_shift_this_employee:
                         works_this_shift = model.NewBoolVar(f"works_{s_id}_{day}_{st}")
-                        model.Add(sum(vars_for_shift_this_employee) >= 1).OnlyEnforceIf(
-                            works_this_shift
-                        )
-                        model.Add(sum(vars_for_shift_this_employee) == 0).OnlyEnforceIf(
-                            works_this_shift.Not()
+                        model.AddMaxEquality(
+                            works_this_shift, vars_for_shift_this_employee
                         )
                         weekly_hours_terms.append(
                             works_this_shift * shift_duration_tenths
                         )
+        # Define total weekly hours variable
         if weekly_hours_terms:
             total_weekly_hours_tenths[s_id] = model.NewIntVar(
                 0, 7 * 24 * 10, f"total_hours_{s_id}"
@@ -124,6 +129,7 @@ def generate_schedule_with_ortools(
             model.Add(total_weekly_hours_tenths[s_id] == sum(weekly_hours_terms))
         else:
             total_weekly_hours_tenths[s_id] = model.NewConstant(0)
+        # Define min hour shortage variable
         min_hours = staff_data.get("minHoursPerWeek")
         min_hours_tenths_target = int(min_hours * 10) if min_hours else 0
         if min_hours_tenths_target > 0:
@@ -138,10 +144,13 @@ def generate_schedule_with_ortools(
         else:
             min_hour_shortage_tenths[s_id] = model.NewConstant(0)
 
+    # --- 4. Add Hard Constraints ---
+
+    # HC1: Demand Equation
     print("[OR-Tools] Adding HARD constraint: Demand equation...")
     for d_idx, day in enumerate(DAYS_OF_WEEK):
-        for st in SHIFT_TYPES:
-            for role in ALL_ROLES:
+        for st in shift_definitions.keys():
+            for role in defined_roles:
                 needed_count = weekly_needs.get(day, {}).get(st, {}).get(role, 0)
                 needed_count = max(0, int(needed_count))
                 qualified_assign_vars = [
@@ -153,33 +162,23 @@ def generate_schedule_with_ortools(
                 if shortage_var is not None:
                     model.Add(sum(qualified_assign_vars) + shortage_var == needed_count)
 
-    print("[OR-Tools] Adding HARD constraint: Single role per logical shift...")
+    # HC2: Single Role Exclusion
+    print("[OR-Tools] Adding HARD constraint: Single assignment & exclusion...")
     for s_id in all_staff_ids:
         for d_idx, day in enumerate(DAYS_OF_WEEK):
-            for st in SHIFT_TYPES:
-                vars_for_staff_shift = [
-                    var
-                    for k, var in assign_vars.items()
-                    if k[0] == s_id and k[1] == d_idx and k[2] == st
-                ]
-                if len(vars_for_staff_shift) > 0:
-                    model.Add(sum(vars_for_staff_shift) <= 1)
+            # Max 1 role per base shift type (AM/PM)
+            for sk_base in ["HALF_DAY_AM", "HALF_DAY_PM"]:
+                if sk_base in shift_definitions.keys():
+                    vars_for_staff_base_shift = [
+                        var
+                        for k, var in assign_vars.items()
+                        if k[0] == s_id and k[1] == d_idx and k[2] == sk_base
+                    ]
+                    if len(vars_for_staff_base_shift) > 0:
+                        model.Add(sum(vars_for_staff_base_shift) <= 1)
+            # Full day vs Half day exclusion
 
-    print("[OR-Tools] Adding HARD constraint: Full/Half day exclusion...")
-    for s_id in all_staff_ids:
-        for d_idx, day in enumerate(DAYS_OF_WEEK):
-            for role in ALL_ROLES:  # Must hold for any role
-                var_full = assign_vars.get((s_id, d_idx, "FULL_DAY", role))
-                var_am = assign_vars.get((s_id, d_idx, "HALF_DAY_AM", role))
-                var_pm = assign_vars.get((s_id, d_idx, "HALF_DAY_PM", role))
-
-                # Cannot work FULL and AM on the same day for the same role
-                if var_full is not None and var_am is not None:
-                    model.Add(var_full + var_am <= 1)
-                # Cannot work FULL and PM on the same day for the same role
-                if var_full is not None and var_pm is not None:
-                    model.Add(var_full + var_pm <= 1)
-
+    # HC3: Unavailability
     print("[OR-Tools] Adding HARD constraint: Unavailability...")
     for unav in unavailability_list:
         s_id = unav.get("employeeId")
@@ -210,28 +209,26 @@ def generate_schedule_with_ortools(
                 )
                 else unav_end_min
             )
-            if effective_unav_end_min == 0 and unav_start_min == 0:
+            if effective_unav_end_min <= 0:
                 continue
-
             for st, shift_info in shift_definitions.items():
                 shift_start_min = time_to_minutes(shift_info["start"])
                 shift_end_min = time_to_minutes(shift_info["end"])
-                if shift_start_min < 0 or shift_end_min < 0:
+                if shift_start_min < 0 or shift_end_min <= shift_start_min:
                     continue
-
                 overlap = (shift_start_min < effective_unav_end_min) and (
                     unav_start_min < shift_end_min
                 )
                 covers = (unav_start_min <= shift_start_min) and (
                     effective_unav_end_min >= shift_end_min
                 )
-
                 if overlap or covers:
-                    for role in ALL_ROLES:
+                    for role in defined_roles:
                         var = assign_vars.get((s_id, d_idx, st, role))
                         if var is not None:
                             model.Add(var == 0)
 
+    # HC4: Max Weekly Hours
     print("[OR-Tools] Adding HARD constraint: Max weekly hours...")
     for s_id, staff_data in staff_map.items():
         max_hours = staff_data.get("maxHoursPerWeek")
@@ -243,69 +240,96 @@ def generate_schedule_with_ortools(
             if s_id in total_weekly_hours_tenths:
                 model.Add(total_weekly_hours_tenths[s_id] <= int(max_hours * 10))
 
+    # --- 5. Define Optimization Objective ---
     print("[OR-Tools] Defining optimization objectives...")
     objective_terms = []
-    PRIORITY_WEIGHTS = {
-        "DEMAND_SHORTAGE": 10000,
-        "MIN_HOUR_SHORTAGE": 100,
-        "SHIFT_PREFERENCE": 10,
-        "STAFF_PRIORITY": 1,
-    }
+    WEIGHT_DEMAND_SHORTAGE = 100000
+    WEIGHT_MIN_HOUR_SHORTAGE = 1000
+    WEIGHT_SHIFT_PREFERENCE = 100
+    WEIGHT_STAFF_PRIORITY = 10
+    WEIGHT_ROLE_PREFERENCE = 5
 
-    # 1. Minimize Demand Shortage
+    # Obj 1: Minimize Demand Shortage
     total_shortage = sum(shortage_vars.values())
-    objective_terms.append(-total_shortage * PRIORITY_WEIGHTS["DEMAND_SHORTAGE"])
-    print(
-        f"  - Added: Minimize Demand Shortage (weight: {PRIORITY_WEIGHTS['DEMAND_SHORTAGE']})"
-    )
+    objective_terms.append(-total_shortage * WEIGHT_DEMAND_SHORTAGE)
+    print(f"  - Added: Minimize Demand Shortage (weight: {WEIGHT_DEMAND_SHORTAGE})")
 
-    # 2. Minimize Min Weekly Hours Shortage
+    # Obj 2: Minimize Min Weekly Hours Shortage
     total_min_hour_shortage = sum(min_hour_shortage_tenths.values())
-    objective_terms.append(
-        -total_min_hour_shortage * PRIORITY_WEIGHTS["MIN_HOUR_SHORTAGE"]
-    )
-    print(
-        f"  - Added: Minimize Min Hour Shortage (weight: {PRIORITY_WEIGHTS['MIN_HOUR_SHORTAGE']})"
-    )
+    objective_terms.append(-total_min_hour_shortage * WEIGHT_MIN_HOUR_SHORTAGE)
+    print(f"  - Added: Minimize Min Hour Shortage (weight: {WEIGHT_MIN_HOUR_SHORTAGE})")
 
-    # 3. Handle Shift Preference
+    # Obj 3: Handle Shift Preference
     if shift_preference == "PRIORITIZE_FULL_DAYS":
-        full_day_vars = [var for k, var in assign_vars.items() if k[2] == "FULL_DAY"]
-        if full_day_vars:
+        full_day_bonuses = []
+        for s_id in all_staff_ids:
+            staff_roles = staff_map[s_id].get("assignedRolesInPriority", [])
+            for d_idx, day in enumerate(DAYS_OF_WEEK):
+                for role in staff_roles:
+                    if role in defined_roles:
+                        var_am = assign_vars.get((s_id, d_idx, "HALF_DAY_AM", role))
+                        var_pm = assign_vars.get((s_id, d_idx, "HALF_DAY_PM", role))
+                        if var_am is not None and var_pm is not None:
+                            works_full_day_role = model.NewBoolVar(
+                                f"full_day_{s_id}_{day}_{role}"
+                            )
+                            model.AddBoolAnd([var_am, var_pm]).OnlyEnforceIf(
+                                works_full_day_role
+                            )
+                            model.AddImplication(works_full_day_role, var_am)
+                            model.AddImplication(works_full_day_role, var_pm)
+                            full_day_bonuses.append(works_full_day_role)
+        if full_day_bonuses:
             total_full_days = model.NewIntVar(
-                0, len(full_day_vars) + 1, "total_full_days"
+                0, len(full_day_bonuses) + 1, "total_implied_full_days"
             )
-            model.Add(
-                total_full_days == sum(full_day_vars)
-            )  # Sum of FULL_DAY assignments
-            objective_terms.append(
-                total_full_days * PRIORITY_WEIGHTS["SHIFT_PREFERENCE"]
-            )
+            model.Add(total_full_days == sum(full_day_bonuses))
+            objective_terms.append(total_full_days * WEIGHT_SHIFT_PREFERENCE)
             print(
-                f"  - Added: Maximize Full Day Assignments (weight {PRIORITY_WEIGHTS['SHIFT_PREFERENCE']})"
+                f"  - Added: Maximize Implied Full Days (weight {WEIGHT_SHIFT_PREFERENCE})"
             )
     elif shift_preference == "PRIORITIZE_HALF_DAYS":
-        half_day_vars = [
-            var
-            for k, var in assign_vars.items()
-            if k[2] == "HALF_DAY_AM" or k[2] == "HALF_DAY_PM"
-        ]
-        if half_day_vars:
+        half_day_indicators = []
+        for s_id in all_staff_ids:
+            for d_idx in range(len(DAYS_OF_WEEK)):
+                works_am_vars = [
+                    v
+                    for k, v in assign_vars.items()
+                    if k[0] == s_id and k[1] == d_idx and k[2] == "HALF_DAY_AM"
+                ]
+                works_pm_vars = [
+                    v
+                    for k, v in assign_vars.items()
+                    if k[0] == s_id and k[1] == d_idx and k[2] == "HALF_DAY_PM"
+                ]
+                works_am = model.NewBoolVar(f"works_am_{s_id}_{d_idx}")
+                works_pm = model.NewBoolVar(f"works_pm_{s_id}_{d_idx}")
+                if works_am_vars:
+                    model.AddMaxEquality(works_am, works_am_vars)
+                else:
+                    model.Add(works_am == 0)
+                if works_pm_vars:
+                    model.AddMaxEquality(works_pm, works_pm_vars)
+                else:
+                    model.Add(works_pm == 0)
+                works_half_day = model.NewBoolVar(f"half_day_{s_id}_{d_idx}")
+                model.Add(works_am + works_pm == 1).OnlyEnforceIf(works_half_day)
+                model.Add(works_am + works_pm != 1).OnlyEnforceIf(works_half_day.Not())
+                half_day_indicators.append(works_half_day)
+        if half_day_indicators:
             total_half_days = model.NewIntVar(
-                0, len(half_day_vars) + 1, "total_half_days"
+                0, len(half_day_indicators) + 1, "total_half_days"
             )
-            model.Add(total_half_days == sum(half_day_vars))
-            objective_terms.append(
-                total_half_days * PRIORITY_WEIGHTS["SHIFT_PREFERENCE"]
-            )
+            model.Add(total_half_days == sum(half_day_indicators))
+            objective_terms.append(total_half_days * WEIGHT_SHIFT_PREFERENCE)
             print(
-                f"  - Added: Maximize Half Day Assignments (weight {PRIORITY_WEIGHTS['SHIFT_PREFERENCE']})"
+                f"  - Added: Maximize Half Day Assignments (weight {WEIGHT_SHIFT_PREFERENCE})"
             )
 
-    # 4. Handle Staff Priority
+    # Obj 4: Handle Staff Priority (by total hours)
     if staff_priority_list:
         print(
-            f"  - Added: Prioritize Staff Hours based on list order (weight {PRIORITY_WEIGHTS['STAFF_PRIORITY']})"
+            f"  - Added: Prioritize Staff Hours based on list order (weight {WEIGHT_STAFF_PRIORITY})"
         )
         staff_priority_objective = []
         max_prio = len(staff_priority_list)
@@ -321,8 +345,22 @@ def generate_schedule_with_ortools(
                 )
         if staff_priority_objective:
             objective_terms.append(
-                sum(staff_priority_objective) * PRIORITY_WEIGHTS["STAFF_PRIORITY"]
+                sum(staff_priority_objective) * WEIGHT_STAFF_PRIORITY
             )
+
+    # Obj 5: Handle Role Preference (based on role_priority_map derived from assignedRolesInPriority)
+    if role_priority_map:
+        print(
+            f"  - Added: Prioritize Staff Role Preference (weight {WEIGHT_ROLE_PREFERENCE})"
+        )
+        role_preference_bonus = []
+        for (s_id, d_idx, st, role), var in assign_vars.items():
+            if role in defined_roles:
+                priority_score = role_priority_map.get((s_id, role), 0)
+                if priority_score > 0 and var is not None:
+                    role_preference_bonus.append(var * priority_score)
+        if role_preference_bonus:
+            objective_terms.append(sum(role_preference_bonus) * WEIGHT_ROLE_PREFERENCE)
 
     # Set combined objective
     if objective_terms:
@@ -350,29 +388,39 @@ def generate_schedule_with_ortools(
         schedule = {}
         for day in DAYS_OF_WEEK:
             schedule[day] = {}
-        for st in SHIFT_TYPES:  # Use logical keys
-            for day in DAYS_OF_WEEK:
-                schedule[day][st] = {}
+        for st in shift_definitions.keys():
+            schedule[day][st] = {}
 
         for (s_id, d_idx, st, role), var in assign_vars.items():
-            if var is not None and solver.Value(var) == 1:
-                day = DAYS_OF_WEEK[d_idx]
-                if st not in schedule[day]:
-                    schedule[day][st] = {}
-                if role not in schedule[day][st]:
-                    schedule[day][st][role] = []
-                if s_id not in schedule[day][st][role]:
-                    schedule[day][st][role].append(s_id)
+            if (
+                var is not None
+                and st in shift_definitions.keys()
+                and role in defined_roles
+            ):
+                if solver.Value(var) == 1:
+                    day = DAYS_OF_WEEK[d_idx]
+                    if day not in schedule:
+                        schedule[day] = {}
+                    if st not in schedule[day]:
+                        schedule[day][st] = {}
+                    if role not in schedule[day][st]:
+                        schedule[day][st][role] = []
+                    if s_id not in schedule[day][st][role]:
+                        schedule[day][st][role].append(s_id)
 
         # Check for shortages
         print("[OR-Tools] Checking for shortages...")
         final_total_shortage = 0
         for (d_idx, st, role), var in shortage_vars.items():
-            if var is not None:
+            if (
+                var is not None
+                and st in shift_definitions.keys()
+                and role in defined_roles
+            ):
                 shortage_amount = solver.Value(var)
                 if shortage_amount > 0:
                     day = DAYS_OF_WEEK[d_idx]
-                    warning_msg = f"Warning: Shortage of {shortage_amount} for {role} on {day} {st}."  # Use st
+                    warning_msg = f"Warning: Shortage of {shortage_amount} for {role} on {day} {st}."
                     warnings.append(warning_msg)
                     print(warning_msg)
                     final_total_shortage += shortage_amount
@@ -402,21 +450,13 @@ def generate_schedule_with_ortools(
                 and isinstance(min_hours, (int, float))
                 and min_hours > 0
             ):
-                # Use calculate_total_weekly_hours which now needs shiftDefinitions
                 total_weekly_hours = calculate_total_weekly_hours(
                     s_id, schedule, shift_definitions
-                )  # Pass definitions
+                )
                 scheduled_at_all = total_weekly_hours > 0
                 tolerance = 0.01
-                min_shortage_var = min_hour_shortage_tenths.get(s_id)
-                min_shortage_val = (
-                    solver.Value(min_shortage_var)
-                    if min_shortage_var is not None
-                    else 0
-                )
                 if scheduled_at_all and total_weekly_hours < min_hours - tolerance:
                     warning_msg = f"Warning: Staff {staff_data.get('name', s_id)} scheduled for {total_weekly_hours:.1f}h, below minimum {min_hours}h."
-                    # if min_shortage_val > 0: warning_msg += f" (Solver penalty applied for {min_shortage_val/10.0:.1f}h shortfall)" # Optional detail
                     warnings.append(warning_msg)
                     print(warning_msg)
 
@@ -441,9 +481,9 @@ def generate_schedule_with_ortools(
         else None
     )
     if final_schedule is not None and not final_schedule:
-        print("[OR-Tools] Note: Solver found solution, but schedule is empty.")
-    final_schedule = (
-        final_schedule if final_schedule is not None else {}
-    )  # Return empty dict on failure? Or None?
+        print(
+            "[OR-Tools] Note: Solver found a solution, but the resulting schedule is empty."
+        )
+        final_schedule = {}
 
     return final_schedule, warnings, calculation_time_ms

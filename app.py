@@ -3,6 +3,7 @@ import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from scheduler.solver import generate_schedule_with_ortools
+from scheduler.utils import validate_shift_definitions
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -18,24 +19,19 @@ def handle_schedule_request():
         data = request.get_json()
         if not data:
             return (
-                jsonify(
-                    {
-                        "success": False,
-                        "message": "Request body is empty or not valid JSON.",
-                    }
-                ),
+                jsonify({"success": False, "message": "Request body empty/not JSON."}),
                 400,
             )
 
+        # --- Extract data ---
         staff_list = data.get("staffList")
         unavailability_list = data.get("unavailabilityList")
         weekly_needs = data.get("weeklyNeeds")
-        # *** Get shift definitions and optimization params ***
         shift_definitions = data.get("shiftDefinitions")
         shift_preference = data.get("shiftPreference", "PRIORITIZE_FULL_DAYS")
         staff_priority_list = data.get("staffPriority", [])
 
-        # --- Validation (Add validation for shiftDefinitions) ---
+        # --- Basic Type Validation ---
         if (
             not isinstance(staff_list, list)
             or not isinstance(unavailability_list, list)
@@ -45,7 +41,6 @@ def handle_schedule_request():
             not in ["PRIORITIZE_FULL_DAYS", "PRIORITIZE_HALF_DAYS", "NONE"]
             or not isinstance(staff_priority_list, list)
         ):
-            print("Error: Missing or invalid type for required data fields.")
             return (
                 jsonify(
                     {
@@ -55,38 +50,61 @@ def handle_schedule_request():
                 ),
                 400,
             )
-        # *** Add validation for shiftDefinitions content (AM End == PM Start etc.) ***
-        try:
-            if (
-                shift_definitions["HALF_DAY_AM"]["end"]
-                != shift_definitions["HALF_DAY_PM"]["start"]
-            ):
+
+        is_valid_shifts, shift_error_msg = validate_shift_definitions(shift_definitions)
+        if not is_valid_shifts:
+            print(f"Error: Invalid shift definitions - {shift_error_msg}")
+            return jsonify({"success": False, "message": shift_error_msg}), 400
+
+        # *** Validate Staff List Structure and Priority List ***
+        if staff_list:
+            valid_staff_ids = set()
+            for staff in staff_list:
+                if (
+                    not isinstance(staff, dict)
+                    or not staff.get("id")
+                    or not isinstance(staff.get("assignedRolesInPriority"), list)
+                ):
+                    return (
+                        jsonify(
+                            {
+                                "success": False,
+                                "message": "Invalid staff structure in staffList.",
+                            }
+                        ),
+                        400,
+                    )
+                valid_staff_ids.add(staff.get("id"))
+                assigned_roles = staff.get("assignedRolesInPriority")
+                if assigned_roles is not None and not isinstance(assigned_roles, list):
+                    return (
+                        jsonify(
+                            {
+                                "success": False,
+                                "message": f"Invalid assignedRolesInPriority for staff {staff.get('id')}",
+                            }
+                        ),
+                        400,
+                    )
+            # Validate staffPriority list contains valid IDs
+            invalid_prio_ids = [
+                sid for sid in staff_priority_list if sid not in valid_staff_ids
+            ]
+            if invalid_prio_ids:
                 return (
                     jsonify(
                         {
                             "success": False,
-                            "message": "Invalid shift definition: AM end time must equal PM start time.",
+                            "message": f"Invalid staff IDs found in staffPriority list: {', '.join(invalid_prio_ids)}",
                         }
                     ),
                     400,
                 )
-            # Add more checks if needed (valid times, start < end)
-        except (KeyError, TypeError):
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "message": "Invalid or incomplete shift definition structure.",
-                    }
-                ),
-                400,
-            )
 
         print(
             f"Received staff: {len(staff_list)}, unav: {len(unavailability_list)}, needs days: {len(weekly_needs)}, "
             f"shiftPref: {shift_preference}, staffPrio: {len(staff_priority_list)}"
         )
-        # print("Shift Definitions:", shift_definitions) # Debug log
 
     except Exception as e:
         print(f"Error parsing request JSON: {e}")
@@ -98,7 +116,7 @@ def handle_schedule_request():
 
     # --- Call Scheduling Logic ---
     try:
-        print("Calling generate_schedule_with_ortools (V7)...")
+        print("Calling generate_schedule_with_ortools...")
         schedule_result, warnings_list, calculation_time = (
             generate_schedule_with_ortools(
                 weekly_needs,
@@ -110,7 +128,7 @@ def handle_schedule_request():
             )
         )
         print(
-            f"generate_schedule_with_ortools (V7) returned. Success: {schedule_result is not None}"
+            f"generate_schedule_with_ortools returned. Success: {schedule_result is not None}"
         )
 
         if schedule_result is not None:
@@ -130,7 +148,7 @@ def handle_schedule_request():
                 jsonify(
                     {
                         "success": False,
-                        "message": "Could not find a valid schedule based on constraints.",
+                        "message": "Could not find a valid schedule.",
                         "warnings": warnings_list if warnings_list else [],
                     }
                 ),
@@ -138,9 +156,7 @@ def handle_schedule_request():
             )
 
     except Exception as schedule_error:
-        print(
-            f"!!! Error during OR-Tools V7 scheduling execution: {schedule_error} !!!"
-        )
+        print(f"!!! Error during OR-Tools scheduling execution: {schedule_error} !!!")
         traceback.print_exc()
         return (
             jsonify(
