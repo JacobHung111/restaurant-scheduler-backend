@@ -167,9 +167,3 @@ def handle_schedule_request():
             ),
             500,
         )
-
-
-# --- Run Server ---
-if __name__ == "__main__":
-    print("Script is being run directly, starting Flask development server...")
-    app.run(host="0.0.0.0", port=5001, debug=True)  # Use port 5001
