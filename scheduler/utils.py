@@ -1,6 +1,6 @@
 # scheduler/utils.py
 import traceback
-from .constants import DAYS_OF_WEEK, SHIFTS
+from .constants import DAYS_OF_WEEK
 
 
 def time_to_minutes(time_str):
@@ -88,7 +88,9 @@ def is_available(employee_id, day_of_week, shift, unavailability_list):
     return True
 
 
-def calculate_daily_hours(employee_id, day_of_week, schedule):
+def calculate_daily_hours(
+    employee_id, day_of_week, schedule, current_shifts_definitions
+):
     total_hours = 0.0
     if (
         not isinstance(schedule, dict)
@@ -96,19 +98,26 @@ def calculate_daily_hours(employee_id, day_of_week, schedule):
         or not isinstance(schedule[day_of_week], dict)
     ):
         return 0.0
-    for shift_key, roles_dict in schedule[day_of_week].items():
-        shift_info = SHIFTS.get(shift_key)
-        if shift_info and isinstance(roles_dict, dict):
+    for shift_type, roles_dict in schedule[day_of_week].items():
+        shift_info = current_shifts_definitions.get(shift_type)
+        if (
+            shift_info
+            and isinstance(roles_dict, dict)
+            and isinstance(shift_info.get("hours"), (int, float))
+        ):
             for role, assigned_list in roles_dict.items():
                 if isinstance(assigned_list, list) and employee_id in assigned_list:
-                    total_hours += shift_info.get("hours", 0.0)
+                    total_hours += shift_info["hours"]
+                    # break # Assuming one role per shift type assignment
     return total_hours
 
 
-def calculate_total_weekly_hours(employee_id, schedule):
+def calculate_total_weekly_hours(employee_id, schedule, current_shifts_definitions):
     total_hours = 0.0
     if not isinstance(schedule, dict):
         return 0.0
     for day in DAYS_OF_WEEK:
-        total_hours += calculate_daily_hours(employee_id, day, schedule)
+        total_hours += calculate_daily_hours(
+            employee_id, day, schedule, current_shifts_definitions
+        )
     return total_hours

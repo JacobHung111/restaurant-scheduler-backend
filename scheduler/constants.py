@@ -13,3 +13,4 @@ SHIFTS = {
     "16:00-21:00": {"start": "16:00", "end": "21:00", "hours": 5.0},
 }
 ALL_ROLES = ["Server", "Cashier", "Expo"]
+SHIFT_TYPES = ["HALF_DAY_AM", "HALF_DAY_PM", "FULL_DAY"]
