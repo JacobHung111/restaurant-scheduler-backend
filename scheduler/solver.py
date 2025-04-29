@@ -371,7 +371,7 @@ def generate_schedule_with_ortools(
 
     # --- 6. Create Solver and Solve ---
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 60.0
+    solver.parameters.max_time_in_seconds = 180.0
     print(f"[OR-Tools] Starting solver...")
     status = solver.Solve(model)
     end_time = time.perf_counter()
