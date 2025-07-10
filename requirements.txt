@@ -7,7 +7,6 @@ immutabledict==4.2.1
 itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.2
-numpy==2.2.5
 ortools==9.12.4544
 pandas==2.2.3
 protobuf==5.29.4
