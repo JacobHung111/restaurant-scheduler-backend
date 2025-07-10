@@ -11,6 +11,11 @@ CORS(application)
 print("Flask application instance created and CORS enabled.")
 
 
+@application.route("/")
+def health_check():
+    return jsonify({"status": "ok"}), 200
+
+
 # --- API Endpoint ---
 @application.route("/api/schedule", methods=["POST"])
 def handle_schedule_request():
