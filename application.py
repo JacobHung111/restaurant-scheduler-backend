@@ -7,7 +7,13 @@ from scheduler.utils import validate_shift_definitions
 
 # --- Flask application Setup ---
 application = Flask(__name__)
-CORS(application)
+CORS(
+    application,
+    origins=[
+        "https://restaurant-scheduler.jacobhung.dpdns.org",
+        "https://restaurant-scheduler-web.vercel.app/",
+    ],
+)
 print("Flask application instance created and CORS enabled.")
 
 
