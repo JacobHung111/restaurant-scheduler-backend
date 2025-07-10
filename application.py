@@ -1,18 +1,18 @@
-# app.py
+# application.py
 import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from scheduler.solver import generate_schedule_with_ortools
 from scheduler.utils import validate_shift_definitions
 
-# --- Flask App Setup ---
-app = Flask(__name__)
-CORS(app)
-print("Flask app instance created and CORS enabled.")
+# --- Flask application Setup ---
+application = Flask(__name__)
+CORS(application)
+print("Flask application instance created and CORS enabled.")
 
 
 # --- API Endpoint ---
-@app.route("/api/schedule", methods=["POST"])
+@application.route("/api/schedule", methods=["POST"])
 def handle_schedule_request():
     print(f"\n--- Received request at /api/schedule ({request.method}) ---")
     try:
