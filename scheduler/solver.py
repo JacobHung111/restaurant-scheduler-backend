@@ -1,8 +1,25 @@
 # scheduler/solver.py
+"""
+Restaurant Staff Scheduling Solver using Google OR-Tools CP-SAT.
+
+This module implements a constraint programming solution for restaurant staff scheduling
+using Google OR-Tools. It optimizes staff assignments across shifts and roles while
+respecting constraints like availability, minimum/maximum hours, and business requirements.
+
+Core Features:
+- Multi-objective optimization with balanced weights
+- Constraint satisfaction for availability and hour limits
+- Role preference and staff priority handling
+- Performance optimized with multi-threading
+"""
 import time
+import logging
+import os
 from ortools.sat.python import cp_model
 from .constants import DAYS_OF_WEEK
 from .utils import time_to_minutes, calculate_total_weekly_hours
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------
@@ -16,7 +33,7 @@ def generate_schedule_with_ortools(
     shift_preference="PRIORITIZE_FULL_DAYS",
     staff_priority_list=[],
 ):
-    print(
+    logger.info(
         f"[OR-Tools] Starting generation (Pref: {shift_preference}, Staff Prio: {len(staff_priority_list)})..."
     )
     start_time = time.perf_counter()
@@ -41,10 +58,9 @@ def generate_schedule_with_ortools(
     role_priority_map = {}  # {(s_id, role): score}
     for staff in staff_list:
         s_id = staff.get("id")
-        roles = staff.get("assignedRolesInPriority")
         assigned_prio_roles = staff.get("assignedRolesInPriority")
-        if isinstance(roles, list):
-            active_roles.update(roles)
+        if isinstance(assigned_prio_roles, list):
+            active_roles.update(assigned_prio_roles)
         if s_id and isinstance(assigned_prio_roles, list):
             active_roles.update(assigned_prio_roles)
             max_prio = len(assigned_prio_roles)
@@ -59,8 +75,8 @@ def generate_schedule_with_ortools(
                     active_roles.update(shift_needs.keys())
     defined_roles = sorted(list(active_roles))
     if not defined_roles:
-        print("Warning: No active roles found.")
-    print(f"[OR-Tools] Active roles for this run: {defined_roles}")
+        logger.info("Warning: No active roles found.")
+    logger.info(f"[OR-Tools] Active roles for this run: {defined_roles}")
 
     max_possible_shortage = len(all_staff_ids) + 1
 
@@ -68,7 +84,7 @@ def generate_schedule_with_ortools(
     role_priority_map = {
         k: v for k, v in role_priority_map.items() if k[1] in defined_roles
     }
-    print(
+    logger.info(
         f"[OR-Tools] Validated Role priority map created with {len(role_priority_map)} entries."
     )
 
@@ -147,7 +163,7 @@ def generate_schedule_with_ortools(
     # --- 4. Add Hard Constraints ---
 
     # HC1: Demand Equation
-    print("[OR-Tools] Adding HARD constraint: Demand equation...")
+    logger.info("[OR-Tools] Adding HARD constraint: Demand equation...")
     for d_idx, day in enumerate(DAYS_OF_WEEK):
         for st in shift_definitions.keys():
             for role in defined_roles:
@@ -163,7 +179,7 @@ def generate_schedule_with_ortools(
                     model.Add(sum(qualified_assign_vars) + shortage_var == needed_count)
 
     # HC2: Single Role Exclusion
-    print("[OR-Tools] Adding HARD constraint: Single assignment & exclusion...")
+    logger.info("[OR-Tools] Adding HARD constraint: Single assignment & exclusion...")
     for s_id in all_staff_ids:
         for d_idx, day in enumerate(DAYS_OF_WEEK):
             # Max 1 role per base shift type (AM/PM)
@@ -176,10 +192,10 @@ def generate_schedule_with_ortools(
                     ]
                     if len(vars_for_staff_base_shift) > 0:
                         model.Add(sum(vars_for_staff_base_shift) <= 1)
-            # Full day vs Half day exclusion
+            # No additional exclusion needed since we only have HALF_DAY shifts
 
     # HC3: Unavailability
-    print("[OR-Tools] Adding HARD constraint: Unavailability...")
+    logger.info("[OR-Tools] Adding HARD constraint: Unavailability...")
     for unav in unavailability_list:
         s_id = unav.get("employeeId")
         day = unav.get("dayOfWeek")
@@ -229,7 +245,7 @@ def generate_schedule_with_ortools(
                             model.Add(var == 0)
 
     # HC4: Max Weekly Hours
-    print("[OR-Tools] Adding HARD constraint: Max weekly hours...")
+    logger.info("[OR-Tools] Adding HARD constraint: Max weekly hours...")
     for s_id, staff_data in staff_map.items():
         max_hours = staff_data.get("maxHoursPerWeek")
         if (
@@ -241,23 +257,23 @@ def generate_schedule_with_ortools(
                 model.Add(total_weekly_hours_tenths[s_id] <= int(max_hours * 10))
 
     # --- 5. Define Optimization Objective ---
-    print("[OR-Tools] Defining optimization objectives...")
+    logger.info("[OR-Tools] Defining optimization objectives...")
     objective_terms = []
-    WEIGHT_DEMAND_SHORTAGE = 100000
-    WEIGHT_MIN_HOUR_SHORTAGE = 1000
+    WEIGHT_DEMAND_SHORTAGE = 10000
+    WEIGHT_MIN_HOUR_SHORTAGE = 2000
     WEIGHT_SHIFT_PREFERENCE = 100
-    WEIGHT_STAFF_PRIORITY = 10
-    WEIGHT_ROLE_PREFERENCE = 5
+    WEIGHT_STAFF_PRIORITY = 20
+    WEIGHT_ROLE_PREFERENCE = 10
 
     # Obj 1: Minimize Demand Shortage
     total_shortage = sum(shortage_vars.values())
     objective_terms.append(-total_shortage * WEIGHT_DEMAND_SHORTAGE)
-    print(f"  - Added: Minimize Demand Shortage (weight: {WEIGHT_DEMAND_SHORTAGE})")
+    logger.info(f"  - Added: Minimize Demand Shortage (weight: {WEIGHT_DEMAND_SHORTAGE})")
 
     # Obj 2: Minimize Min Weekly Hours Shortage
     total_min_hour_shortage = sum(min_hour_shortage_tenths.values())
     objective_terms.append(-total_min_hour_shortage * WEIGHT_MIN_HOUR_SHORTAGE)
-    print(f"  - Added: Minimize Min Hour Shortage (weight: {WEIGHT_MIN_HOUR_SHORTAGE})")
+    logger.info(f"  - Added: Minimize Min Hour Shortage (weight: {WEIGHT_MIN_HOUR_SHORTAGE})")
 
     # Obj 3: Handle Shift Preference
     if shift_preference == "PRIORITIZE_FULL_DAYS":
@@ -285,7 +301,7 @@ def generate_schedule_with_ortools(
             )
             model.Add(total_full_days == sum(full_day_bonuses))
             objective_terms.append(total_full_days * WEIGHT_SHIFT_PREFERENCE)
-            print(
+            logger.info(
                 f"  - Added: Maximize Implied Full Days (weight {WEIGHT_SHIFT_PREFERENCE})"
             )
     elif shift_preference == "PRIORITIZE_HALF_DAYS":
@@ -322,13 +338,13 @@ def generate_schedule_with_ortools(
             )
             model.Add(total_half_days == sum(half_day_indicators))
             objective_terms.append(total_half_days * WEIGHT_SHIFT_PREFERENCE)
-            print(
+            logger.info(
                 f"  - Added: Maximize Half Day Assignments (weight {WEIGHT_SHIFT_PREFERENCE})"
             )
 
     # Obj 4: Handle Staff Priority (by total hours)
     if staff_priority_list:
-        print(
+        logger.info(
             f"  - Added: Prioritize Staff Hours based on list order (weight {WEIGHT_STAFF_PRIORITY})"
         )
         staff_priority_objective = []
@@ -350,7 +366,7 @@ def generate_schedule_with_ortools(
 
     # Obj 5: Handle Role Preference (based on role_priority_map derived from assignedRolesInPriority)
     if role_priority_map:
-        print(
+        logger.info(
             f"  - Added: Prioritize Staff Role Preference (weight {WEIGHT_ROLE_PREFERENCE})"
         )
         role_preference_bonus = []
@@ -365,18 +381,30 @@ def generate_schedule_with_ortools(
     # Set combined objective
     if objective_terms:
         model.Maximize(sum(objective_terms))
-        print("[OR-Tools] Combined objective function set.")
+        logger.info("[OR-Tools] Combined objective function set.")
     else:
-        print("[OR-Tools] No specific optimization objectives enabled.")
+        logger.info("[OR-Tools] No specific optimization objectives enabled.")
 
     # --- 6. Create Solver and Solve ---
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 60.0
-    print(f"[OR-Tools] Starting solver...")
+
+    # Performance optimization parameters
+    solver.parameters.max_time_in_seconds = 180.0
+    # Optimize worker count based on CPU cores
+    max_workers = min(os.cpu_count() or 4, 8)  # Use CPU cores, max 8
+    solver.parameters.num_search_workers = max_workers
+    solver.parameters.log_search_progress = True
+    solver.parameters.cp_model_presolve = True
+    solver.parameters.cp_model_probing_level = 2
+    solver.parameters.linearization_level = 2
+
+    logger.info(
+        f"[OR-Tools] Starting solver with {solver.parameters.num_search_workers} workers..."
+    )
     status = solver.Solve(model)
     end_time = time.perf_counter()
     calculation_time_ms = int((end_time - start_time) * 1000)
-    print(
+    logger.info(
         f"[OR-Tools] Solver finished with status: {solver.StatusName(status)} in {calculation_time_ms} ms"
     )
 
@@ -384,12 +412,12 @@ def generate_schedule_with_ortools(
     schedule = None
     warnings = []
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        print("[OR-Tools] Solution found. Building schedule dictionary...")
+        logger.info("[OR-Tools] Solution found. Building schedule dictionary...")
         schedule = {}
         for day in DAYS_OF_WEEK:
             schedule[day] = {}
-        for st in shift_definitions.keys():
-            schedule[day][st] = {}
+            for st in shift_definitions.keys():
+                schedule[day][st] = {}
 
         for (s_id, d_idx, st, role), var in assign_vars.items():
             if (
@@ -409,7 +437,7 @@ def generate_schedule_with_ortools(
                         schedule[day][st][role].append(s_id)
 
         # Check for shortages
-        print("[OR-Tools] Checking for shortages...")
+        logger.info("[OR-Tools] Checking for shortages...")
         final_total_shortage = 0
         for (d_idx, st, role), var in shortage_vars.items():
             if (
@@ -422,12 +450,12 @@ def generate_schedule_with_ortools(
                     day = DAYS_OF_WEEK[d_idx]
                     warning_msg = f"Warning: Shortage of {shortage_amount} for {role} on {day} {st}."
                     warnings.append(warning_msg)
-                    print(warning_msg)
+                    logger.warning(warning_msg)
                     final_total_shortage += shortage_amount
         if final_total_shortage > 0:
-            print(f"[OR-Tools] Total shortages found: {final_total_shortage}")
+            logger.info(f"[OR-Tools] Total shortages found: {final_total_shortage}")
         else:
-            print("[OR-Tools] No shortages found.")
+            logger.info("[OR-Tools] No shortages found.")
 
         # Cleanup empty structures
         for day in list(schedule.keys()):
@@ -439,10 +467,10 @@ def generate_schedule_with_ortools(
                     del schedule[day][st]
             if not schedule[day]:
                 del schedule[day]
-        print("[OR-Tools] Schedule dictionary built and cleaned.")
+        logger.info("[OR-Tools] Schedule dictionary built and cleaned.")
 
         # Post-check for minimum weekly hours
-        print("[OR-Tools] Performing post-check for minimum weekly hours...")
+        logger.info("[OR-Tools] Performing post-check for minimum weekly hours...")
         for s_id, staff_data in staff_map.items():
             min_hours = staff_data.get("minHoursPerWeek")
             if (
@@ -458,19 +486,19 @@ def generate_schedule_with_ortools(
                 if scheduled_at_all and total_weekly_hours < min_hours - tolerance:
                     warning_msg = f"Warning: Staff {staff_data.get('name', s_id)} scheduled for {total_weekly_hours:.1f}h, below minimum {min_hours}h."
                     warnings.append(warning_msg)
-                    print(warning_msg)
+                    logger.warning(warning_msg)
 
     # Handle other statuses
     elif status == cp_model.INFEASIBLE:
-        print("[OR-Tools] Model is infeasible (Hard constraints conflict).")
+        logger.error("[OR-Tools] Model is infeasible (Hard constraints conflict).")
         warnings.append(
             "Error: Could not generate any schedule due to conflicting hard constraints (e.g., unavailability, max hours)."
         )
     elif status == cp_model.MODEL_INVALID:
-        print("[OR-Tools] Model is invalid.")
+        logger.error("[OR-Tools] Model is invalid.")
         warnings.append("Error: The scheduling model definition is invalid.")
     else:
-        print(f"[OR-Tools] Solver stopped with status: {solver.StatusName(status)}")
+        logger.warning(f"[OR-Tools] Solver stopped with status: {solver.StatusName(status)}")
         warnings.append(
             f"Solver stopped without an optimal/feasible solution (Status: {solver.StatusName(status)}). Time limit might be too short or model issues."
         )
@@ -481,7 +509,7 @@ def generate_schedule_with_ortools(
         else None
     )
     if final_schedule is not None and not final_schedule:
-        print(
+        logger.warning(
             "[OR-Tools] Note: Solver found a solution, but the resulting schedule is empty."
         )
         final_schedule = {}

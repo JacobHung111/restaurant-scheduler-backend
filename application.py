@@ -1,20 +1,104 @@
-# app.py
-import traceback
+# application.py
+import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 from scheduler.solver import generate_schedule_with_ortools
 from scheduler.utils import validate_shift_definitions
 
-# --- Flask App Setup ---
-app = Flask(__name__)
-CORS(app)
-print("Flask app instance created and CORS enabled.")
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# --- Flask application Setup ---
+application = Flask(__name__)
+
+# Security and performance configuration
+application.config.update(
+    MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB max request size
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
+CORS(
+    application,
+    origins=[
+        "https://restaurant-scheduler.jacobhung.dpdns.org",
+        "https://restaurant-scheduler-web.vercel.app/",
+        "http://localhost:5173",  # Local development
+        "http://127.0.0.1:5173",  # Local development (alternative)
+        "http://localhost:3000",  # Common frontend port
+        "http://127.0.0.1:3000",  # Common frontend port (alternative)
+    ],
+)
+logger.info("Flask application instance created and CORS enabled.")
+
+
+# --- Security Headers Middleware ---
+@application.after_request
+def add_security_headers(response):
+    """Add security headers to all responses."""
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+
+    # Production environment only
+    # if not application.debug:
+    #     response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    #     response.headers['Content-Security-Policy'] = "default-src 'self'"
+
+    return response
+
+
+# --- Global Error Handlers ---
+@application.errorhandler(HTTPException)
+def handle_http_exception(e):
+    """Return JSON instead of HTML for HTTP errors."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error": e.name,
+                "message": e.description,
+                "code": e.code,
+            }
+        ),
+        e.code,
+    )
+
+
+@application.errorhandler(Exception)
+def handle_generic_exception(e):
+    """Handle unexpected exceptions."""
+    if isinstance(e, HTTPException):
+        return e
+
+    logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error": "Internal Server Error",
+                "message": "An unexpected error occurred.",
+            }
+        ),
+        500,
+    )
+
+
+@application.route("/")
+def health_check():
+    return jsonify({"status": "ok", "service": "restaurant-schedule-backend"}), 200
 
 
 # --- API Endpoint ---
-@app.route("/api/schedule", methods=["POST"])
+@application.route("/api/schedule", methods=["POST"])
 def handle_schedule_request():
-    print(f"\n--- Received request at /api/schedule ({request.method}) ---")
+    request_id = id(request)
+    logger.info(f"[{request_id}] Received schedule request from {request.remote_addr}")
     try:
         data = request.get_json()
         if not data:
@@ -101,14 +185,14 @@ def handle_schedule_request():
                     400,
                 )
 
-        print(
-            f"Received staff: {len(staff_list)}, unav: {len(unavailability_list)}, needs days: {len(weekly_needs)}, "
-            f"shiftPref: {shift_preference}, staffPrio: {len(staff_priority_list)}"
+        logger.info(
+            f"[{request_id}] Validated input - Staff: {len(staff_list)}, "
+            f"Unavailability: {len(unavailability_list)}, Needs days: {len(weekly_needs)}, "
+            f"Shift preference: {shift_preference}, Staff priority: {len(staff_priority_list)}"
         )
 
     except Exception as e:
-        print(f"Error parsing request JSON: {e}")
-        traceback.print_exc()
+        logger.error(f"[{request_id}] Error parsing request JSON: {e}", exc_info=True)
         return (
             jsonify({"success": False, "message": "Error parsing request data."}),
             400,
@@ -116,7 +200,7 @@ def handle_schedule_request():
 
     # --- Call Scheduling Logic ---
     try:
-        print("Calling generate_schedule_with_ortools...")
+        logger.info(f"[{request_id}] Starting OR-Tools scheduling...")
         schedule_result, warnings_list, calculation_time = (
             generate_schedule_with_ortools(
                 weekly_needs,
@@ -127,8 +211,9 @@ def handle_schedule_request():
                 staff_priority_list,
             )
         )
-        print(
-            f"generate_schedule_with_ortools returned. Success: {schedule_result is not None}"
+        logger.info(
+            f"[{request_id}] OR-Tools completed in {calculation_time}ms. "
+            f"Success: {schedule_result is not None}, Warnings: {len(warnings_list or [])}"
         )
 
         if schedule_result is not None:
@@ -156,8 +241,9 @@ def handle_schedule_request():
             )
 
     except Exception as schedule_error:
-        print(f"!!! Error during OR-Tools scheduling execution: {schedule_error} !!!")
-        traceback.print_exc()
+        logger.error(
+            f"[{request_id}] OR-Tools scheduling error: {schedule_error}", exc_info=True
+        )
         return (
             jsonify(
                 {
@@ -169,7 +255,7 @@ def handle_schedule_request():
         )
 
 
-# --- Run Server ---
+# --- Application Entry Point ---
 if __name__ == "__main__":
-    print("Script is being run directly, starting Flask development server...")
-    app.run(host="0.0.0.0", port=5001, debug=True)  # Use port 5001
+    logger.info("Starting Flask development server...")
+    application.run(debug=True, host="0.0.0.0", port=5000)

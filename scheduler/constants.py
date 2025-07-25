@@ -1,7 +1,9 @@
 # scheduler/constants.py
+"""Constants for restaurant scheduling system."""
+
 DAYS_OF_WEEK = [
     "Monday",
-    "Tuesday",
+    "Tuesday", 
     "Wednesday",
     "Thursday",
     "Friday",
