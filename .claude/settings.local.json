@@ -7,8 +7,7 @@
       "Bash(python:*)",
       "Bash(grep:*)",
       "Bash(pkill:*)",
-      "Bash(curl:*)",
-      "Bash(git checkout:*)"
+      "Bash(curl:*)"
     ],
     "deny": []
   }
