@@ -217,28 +217,51 @@ def generate_schedule_with_ortools(
                 continue
             unav_start_min = time_to_minutes(unav_span["start"])
             unav_end_min = time_to_minutes(unav_span["end"])
-            effective_unav_end_min = (
-                24 * 60
-                if (
-                    unav_end_min <= unav_start_min
-                    and not (unav_start_min == 0 and unav_end_min == 0)
-                )
-                else unav_end_min
+            
+            # Handle cross-day unavailability (e.g., 19:00 to 02:00)
+            is_cross_day = (
+                unav_end_min <= unav_start_min
+                and not (unav_start_min == 0 and unav_end_min == 0)
             )
-            if effective_unav_end_min <= 0:
+            
+            if unav_start_min < 0 or unav_end_min < 0:
                 continue
+                
             for st, shift_info in shift_definitions.items():
                 shift_start_min = time_to_minutes(shift_info["start"])
                 shift_end_min = time_to_minutes(shift_info["end"])
-                if shift_start_min < 0 or shift_end_min <= shift_start_min:
+                if shift_start_min < 0 or shift_end_min < 0:
                     continue
-                overlap = (shift_start_min < effective_unav_end_min) and (
-                    unav_start_min < shift_end_min
-                )
-                covers = (unav_start_min <= shift_start_min) and (
-                    effective_unav_end_min >= shift_end_min
-                )
-                if overlap or covers:
+                
+                # Check if this is a cross-day shift
+                is_cross_day_shift = shift_end_min <= shift_start_min
+                
+                # Check for overlap between unavailability and shift
+                overlap = False
+                
+                if is_cross_day and is_cross_day_shift:
+                    # Both unavailability and shift are cross-day
+                    # This means they both span midnight, so they definitely overlap
+                    overlap = True
+                elif is_cross_day and not is_cross_day_shift:
+                    # Cross-day unavailability vs same-day shift
+                    # Part 1: unav_start_min to midnight (1440) vs same-day shift
+                    overlap_part1 = (shift_start_min < 1440) and (unav_start_min < shift_end_min)
+                    # Part 2: midnight (0) to unav_end_min vs same-day shift
+                    overlap_part2 = (shift_start_min < unav_end_min) and (0 < shift_end_min)
+                    overlap = overlap_part1 or overlap_part2
+                elif not is_cross_day and is_cross_day_shift:
+                    # Same-day unavailability vs cross-day shift
+                    # Part 1: same-day unav vs shift_start_min to midnight
+                    overlap_part1 = (unav_start_min < 1440) and (shift_start_min < unav_end_min)
+                    # Part 2: same-day unav vs midnight to shift_end_min
+                    overlap_part2 = (unav_start_min < shift_end_min) and (0 < unav_end_min)
+                    overlap = overlap_part1 or overlap_part2
+                else:
+                    # Both same-day: standard overlap check
+                    overlap = (shift_start_min < unav_end_min) and (unav_start_min < shift_end_min)
+                
+                if overlap:
                     for role in defined_roles:
                         var = assign_vars.get((s_id, d_idx, st, role))
                         if var is not None:

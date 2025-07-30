@@ -22,6 +22,33 @@ def time_to_minutes(time_str):
         return -1
 
 
+def calculate_cross_day_duration_hours(start_time, end_time):
+    """Calculate duration in hours between two times, handling cross-day scenarios.
+    
+    Args:
+        start_time (str): Start time in HH:MM format
+        end_time (str): End time in HH:MM format
+        
+    Returns:
+        float: Duration in hours. For cross-day times (e.g., 19:00 to 02:00), 
+               calculates the actual duration (7 hours in this case)
+    """
+    start_minutes = time_to_minutes(start_time)
+    end_minutes = time_to_minutes(end_time)
+    
+    if start_minutes < 0 or end_minutes < 0:
+        return 0.0
+    
+    if end_minutes <= start_minutes:
+        # Cross-day scenario: calculate time from start to midnight + time from midnight to end
+        duration_minutes = (24 * 60 - start_minutes) + end_minutes
+    else:
+        # Same-day scenario
+        duration_minutes = end_minutes - start_minutes
+    
+    return duration_minutes / 60.0
+
+
 def calculate_daily_hours(employee_id, day_of_week, schedule, shift_definitions):
     """Calculate total hours worked by an employee on a specific day.
     
@@ -93,14 +120,26 @@ def validate_shift_definitions(shift_defs):
             or time_to_minutes(pm_end) < 0
         ):
             return False, "Invalid time value in shift definitions."
-        # Check start < end
+        # Check start < end (AM shifts must be same-day)
         if time_to_minutes(am_start) >= time_to_minutes(am_end):
             return False, "AM start must be before AM end."
-        if time_to_minutes(pm_start) >= time_to_minutes(pm_end):
-            return False, "PM start must be before PM end."
-        # Check consistency
-        if am_end != pm_start:
-            return False, "AM shift end must equal PM shift start."
+        
+        # PM shifts can be cross-day, so only validate if they appear to be same-day
+        pm_start_min = time_to_minutes(pm_start)
+        pm_end_min = time_to_minutes(pm_end)
+        if pm_start_min >= pm_end_min:
+            # This is a cross-day PM shift (e.g., 22:00 to 06:00), which is valid
+            # Calculate duration to ensure it's reasonable (not more than 12 hours)
+            cross_day_duration = calculate_cross_day_duration_hours(pm_start, pm_end)
+            if cross_day_duration <= 0 or cross_day_duration > 12:
+                return False, "Invalid cross-day PM shift duration (must be between 0-12 hours)."
+        # Same-day PM shift validation is implicit (start < end already checked above)
+        
+        # Check AM/PM consistency - only required for same-day PM shifts
+        if pm_start_min < pm_end_min:  # Same-day PM shift
+            if am_end != pm_start:
+                return False, "AM shift end must equal PM shift start for same-day PM shifts."
+        # For cross-day PM shifts, there's no required consistency with AM end time
     except (KeyError, TypeError, ValueError) as e:
         logger.error(f"Error during shift definition validation: {e}")
         return False, "Invalid structure or value within shiftDefinitions object."
