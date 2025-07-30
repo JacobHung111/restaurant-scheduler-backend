@@ -1,5 +1,6 @@
 # application.py
 import logging
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
@@ -29,18 +30,17 @@ def create_app(test_config=None):
     if test_config:
         app.config.update(test_config)
     
-    # Setup CORS
-    CORS(
-        app,
-        origins=[
-            "https://restaurant-scheduler.jacobhung.dpdns.org",
-            "https://restaurant-scheduler-web.vercel.app/",
-        "http://localhost:5173",  # Local development
-        "http://127.0.0.1:5173",  # Local development (alternative)
-            "http://localhost:3000",  # Common frontend port
-            "http://127.0.0.1:3000",  # Common frontend port (alternative)
-        ],
-    )
+    # Setup CORS with environment-based configuration
+    cors_origins = os.getenv('CORS_ORIGINS', 
+        'https://restaurant-scheduler.jacobhung.dpdns.org,'
+        'https://restaurant-scheduler-web.vercel.app/,'
+        'http://localhost:5173,'
+        'http://127.0.0.1:5173,'
+        'http://localhost:3000,'
+        'http://127.0.0.1:3000'
+    ).split(',')
+    
+    CORS(app, origins=[origin.strip() for origin in cors_origins])
     
     # --- Security Headers Middleware ---
     @app.after_request
